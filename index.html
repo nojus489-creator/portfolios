@@ -275,55 +275,50 @@ async function doRefresh(){
   var ok=0, errs=[];
   var K='7G1V9IPr9yQ4Npx4HhkWcpxaBVgAh9Ng';
   var base='https://api.massive.com/v2';
+  var today=new Date().toISOString().slice(0,10);
+  var yesterday=new Date(Date.now()-864e5).toISOString().slice(0,10);
 
-  function getPrice(t){
-    // Try multiple price fields in order of preference
-    if(!t)return 0;
-    var d=t.day,lt=t.lastTrade,lq=t.lastQuote,pd=t.prevDay;
-    return (d&&d.c>0?d.c:0)||(lt&&lt.p>0?lt.p:0)||(lq&&((lq.P+lq.p)/2)>0?(lq.P+lq.p)/2:0)||(pd&&pd.c>0?pd.c:0)||0;
-  }
-
-  // 1. EUR/USD + EUR/GBP via Massive forex
+  // 1. EUR/USD via ECB (free, reliable, no CORS issues)
   try{
-    var r=await fetch(base+'/snapshot/locale/global/markets/forex/tickers?tickers=C:EURUSD,C:EURGBP&apiKey='+K);
-    if(!r.ok)throw new Error('FX HTTP '+r.status);
-    var d=await r.json();
-    if(d.tickers&&d.tickers.length>0){
-      d.tickers.forEach(function(t){
-        var p=getPrice(t);
-        if(t.ticker==='C:EURUSD'&&p>0){FX.eu=p;}
-        if(t.ticker==='C:EURGBP'&&p>0){FX.gb=p;}
-      });
-      document.getElementById('fxShow').textContent=FX.eu.toFixed(4);
+    var rf=await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD,GBP');
+    if(!rf.ok)throw new Error('ECB '+rf.status);
+    var df=await rf.json();
+    if(df.rates){
+      if(df.rates.USD>0)FX.eu=df.rates.USD;
+      if(df.rates.GBP>0)FX.gb=df.rates.GBP;
     }
+    document.getElementById('fxShow').textContent=FX.eu.toFixed(4);
   }catch(e){errs.push('FX:'+e.message);}
 
-  // 2. BTC via Massive crypto (X:BTCUSD) → convert to EUR
+  // 2. BTC via Coinbase (free, no CORS, no key needed)
   try{
-    var r2=await fetch(base+'/snapshot/locale/global/markets/crypto/tickers?tickers=X:BTCUSD&apiKey='+K);
-    if(!r2.ok)throw new Error('BTC HTTP '+r2.status);
-    var d2=await r2.json();
-    if(d2.tickers&&d2.tickers.length>0){
-      var btcUsd=getPrice(d2.tickers[0]);
-      if(btcUsd>0){P['BTC-EUR']={p:+(btcUsd/FX.eu).toFixed(2),cur:'EUR',s:'🟢'};ok++;}
-      else errs.push('BTC:no price');
+    var rc=await fetch('https://api.coinbase.com/v2/prices/BTC-EUR/spot');
+    if(!rc.ok)throw new Error('Coinbase '+rc.status);
+    var dc=await rc.json();
+    if(dc.data&&dc.data.amount){
+      P['BTC-EUR']={p:parseFloat(dc.data.amount),cur:'EUR',s:'🟢'};ok++;
     }
   }catch(e){errs.push('BTC:'+e.message);}
 
-  // 3. US stocks via Massive snapshot (all in one request)
+  // 3. US stocks via Massive prev-day close (available on free tier)
+  // Endpoint: GET /v2/aggs/ticker/{ticker}/prev
   var ustk=['AMZN','MSFT','NVDA','AVGO','MA','ORCL','AMD'];
-  try{
-    var r3=await fetch(base+'/snapshot/locale/us/markets/stocks/tickers?tickers='+ustk.join(',')+'&apiKey='+K);
-    if(!r3.ok)throw new Error('Stocks HTTP '+r3.status);
-    var d3=await r3.json();
-    if(d3.tickers&&d3.tickers.length>0){
-      d3.tickers.forEach(function(t){
-        var p=getPrice(t);
-        if(p>0){P[t.ticker]={p:p,cur:'USD',s:'🟢'};ok++;}
-        else errs.push(t.ticker+':no price');
-      });
-    }else errs.push('Stocks:empty response');
-  }catch(e){errs.push('Stocks:'+e.message);}
+  var stockResults=await Promise.all(ustk.map(async function(t){
+    try{
+      var r=await fetch(base+'/aggs/ticker/'+t+'/prev?adjusted=true&apiKey='+K);
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      var d=await r.json();
+      if(d.results&&d.results.length>0&&d.results[0].c>0){
+        return {ticker:t, price:d.results[0].c};
+      }
+      return null;
+    }catch(e){return {ticker:t,err:e.message};}
+  }));
+  stockResults.forEach(function(res){
+    if(!res)return;
+    if(res.err){errs.push(res.ticker+':'+res.err);}
+    else{P[res.ticker]={p:res.price,cur:'USD',s:'🟢'};ok++;}
+  });
 
   render();
   lu.innerHTML=(ok>0?'🟢 '+ok+' live':'⚠️ 0 live')+
